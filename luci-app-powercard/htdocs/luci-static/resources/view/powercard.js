@@ -523,7 +523,7 @@ return view.extend({
 		btn.disabled = true;
 		btn.textContent = '保存中...';
 
-		callSetConfig({ ip: ip }).then(function (d) {
+		callSetConfig(ip).then(function (d) {
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '设备地址已保存' : '保存失败'), !!d.ok);
 			if (d.ok) {
@@ -714,7 +714,7 @@ return view.extend({
 
 		self.busy(true, '正在执行：' + actionName + ' ' + durationText);
 
-		callPower({ type: type, ms: ms }).then(function (d) {
+		callPower(type, ms).then(function (d) {
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '执行成功' : '执行失败'), !!d.ok);
 

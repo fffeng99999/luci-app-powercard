@@ -46,15 +46,17 @@ jobs:
       - name: Show built ipk
         run: find bin/packages/aarch64_cortex-a53 -name 'luci-app-powercard_*.ipk' -ls
 
-      # Give each SDK product a distinct, readable name so both matrix
+      # Give each SDK product a distinct, readable name (keeping the
+      # real PKG_VERSION/PKG_RELEASE from the SDK output) so both matrix
       # jobs can attach their file to the same GitHub Release.
       - name: Stage ipk
         env:
           LABEL: ${{ matrix.label }}
         run: |
           mkdir -p staged
-          find bin/packages/aarch64_cortex-a53 -name 'luci-app-powercard_*.ipk' \
-            -exec cp {} staged/luci-app-powercard_1.0.0_all_${LABEL}.ipk \;
+          f=$(find bin/packages/aarch64_cortex-a53 \
+                -name 'luci-app-powercard_*.ipk' | head -n1)
+          cp "$f" "staged/$(basename "${f%.ipk}")_${LABEL}.ipk"
           ls -l staged/
 
       - name: Upload ipk artifact
