@@ -23,14 +23,16 @@ concurrency:
 
 jobs:
   build:
-    name: SDK ${{ matrix.sdk }}
+    name: SDK ${{ matrix.label }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        sdk:
-          - aarch64_cortex-a53-23.05.6
-          - aarch64_cortex-a53-24.10.8
+        include:
+          - sdk: aarch64_cortex-a53-23.05.6
+            label: openwrt-23.05
+          - sdk: aarch64_cortex-a53-24.10.8
+            label: openwrt-24.10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,20 +46,29 @@ jobs:
       - name: Show built ipk
         run: find bin/packages/aarch64_cortex-a53 -name 'luci-app-powercard_*.ipk' -ls
 
+      # Give each SDK product a distinct, readable name so both matrix
+      # jobs can attach their file to the same GitHub Release.
+      - name: Stage ipk
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          mkdir -p staged
+          find bin/packages/aarch64_cortex-a53 -name 'luci-app-powercard_*.ipk' \
+            -exec cp {} staged/luci-app-powercard_1.0.0_all_${LABEL}.ipk \;
+          ls -l staged/
+
       - name: Upload ipk artifact
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-powercard-a53-${{ matrix.sdk }}
-          path: bin/packages/aarch64_cortex-a53/**/luci-app-powercard_*.ipk
+          name: luci-app-powercard-a53-${{ matrix.label }}
+          path: staged/*.ipk
           if-no-files-found: error
 
-      # Pushing a tag (e.g. git tag v1.0.0 && git push --tags) also
-      # publishes the ipk file on a GitHub Release page. The package is
-      # architecture-independent, so one upload from the 24.10 SDK job
-      # covers every device (both jobs keep their own CI artifacts).
+      # A tag push (e.g. git tag v1.0.0) also publishes the file on the
+      # GitHub Release page. Both jobs upload their distinctly named file.
       - name: Publish release on tag
-        if: startsWith(github.ref, 'refs/tags/') && matrix.sdk == 'aarch64_cortex-a53-24.10.8'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: bin/packages/aarch64_cortex-a53/**/luci-app-powercard_*.ipk
+          files: staged/*.ipk
           generate_release_notes: true

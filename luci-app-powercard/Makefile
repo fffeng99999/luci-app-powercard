@@ -16,16 +16,17 @@ LUCI_TITLE:=LuCI panel for ESP8266 PC PowerCard
 LUCI_DEPENDS:=+luci-base +rpcd +uclient-fetch +jsonfilter
 LUCI_PKGARCH:=all
 
-# Make sure the rpcd plugin keeps its executable bit regardless of the
-# source file system the package was copied from.
-define Hooks/Prepare/Post
-	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/rpcd/powercard
-endef
-
 define Package/$(PKG_NAME)/conffiles
 /etc/config/powercard
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk
+
+# Re-assert the executable bit of the rpcd plugin: checkouts on
+# case-insensitive file systems (Windows/macOS) may lose it.
+define Package/$(PKG_NAME)/install
+	$(call Package/luci/install/target,$(1),$(PKG_INSTALL_DIR))
+	chmod 0755 $(1)/usr/libexec/rpcd/powercard
+endef
 
 # call BuildPackage - OpenWrt buildroot signature
