@@ -1,0 +1,4 @@
+# locally built artifacts
+/dist/
+*.ipk
+logs/

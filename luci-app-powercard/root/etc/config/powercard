@@ -1,0 +1,4 @@
+config powercard 'main'
+	option ip '192.168.58.246'
+	option port '80'
+	option timeout '5'

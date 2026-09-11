@@ -1,0 +1,238 @@
+#!/bin/sh
+#
+# rpcd backend for luci-app-powercard
+#
+# Proxies the HTTP API of the ESP8266 PC PowerCard so that the browser
+# only talks to LuCI same-origin (the ESP firmware sends no CORS header).
+#
+# Device address is read from /etc/config/powercard:
+#	config powercard 'main'
+#		option ip      '192.168.58.246'
+#		option port    '80'
+#		option timeout '5'
+#
+# Manual test:
+#	echo '{}' | ubus call powercard status
+#	echo '{"type":"on"}' | ubus call powercard power
+#	echo '{"type":"custom","ms":2000}' | ubus call powercard power
+#	echo '{}' | ubus call powercard reset
+
+set -u
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH
+
+CONFIG="powercard"
+DEFAULT_IP="192.168.58.246"
+
+CFG_IP="$DEFAULT_IP"
+CFG_PORT="80"
+CFG_TIMEOUT="5"
+
+read_config() {
+	local ip port timeout
+
+	ip=$(uci -q get "$CONFIG.main.ip" 2>/dev/null)
+	port=$(uci -q get "$CONFIG.main.port" 2>/dev/null)
+	timeout=$(uci -q get "$CONFIG.main.timeout" 2>/dev/null)
+
+	[ -n "$ip" ] && CFG_IP="$ip"
+	[ -n "$port" ] && CFG_PORT="$port"
+	[ -n "$timeout" ] && CFG_TIMEOUT="$timeout"
+}
+
+# Minimal JSON string escaper (backslash / double quote).
+json_escape() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Strict dotted-quad IPv4 check. Returns 0 when valid.
+valid_ip() {
+	local ip="$1" count=0 oct oldifs
+
+	case "$ip" in
+		'' | *[!0-9.]* | *..* | .* | *.)
+			return 1
+			;;
+	esac
+
+	oldifs="$IFS"
+	IFS='.'
+	for oct in $ip; do
+		count=$((count + 1))
+		[ ${#oct} -ge 1 ] && [ ${#oct} -le 3 ] || { IFS="$oldifs"; return 1; }
+		case "$oct" in
+			*[!0-9]*)
+				IFS="$oldifs"
+				return 1
+				;;
+		esac
+		[ "$oct" -le 255 ] || { IFS="$oldifs"; return 1; }
+	done
+	IFS="$oldifs"
+
+	[ "$count" -eq 4 ]
+}
+
+# Unsigned integer within [min, max]. Returns 0 when valid.
+valid_uint() {
+	case "$1" in
+		'' | *[!0-9]*)
+			return 1
+			;;
+	esac
+	[ "$1" -ge "$2" ] 2>/dev/null && [ "$1" -le "$3" ] 2>/dev/null
+}
+
+do_get_config() {
+	read_config
+	printf '{"ip":"%s","port":"%s","timeout":"%s"}\n' \
+		"$CFG_IP" "$CFG_PORT" "$CFG_TIMEOUT"
+}
+
+do_set_config() {
+	local input ip port timeout
+
+	read -r input
+	ip=$(printf '%s' "$input" | jsonfilter -e '@.ip' 2>/dev/null)
+	port=$(printf '%s' "$input" | jsonfilter -e '@.port' 2>/dev/null)
+	timeout=$(printf '%s' "$input" | jsonfilter -e '@.timeout' 2>/dev/null)
+
+	if ! valid_ip "$ip"; then
+		emit_error "IP 地址格式不正确"
+		return 0
+	fi
+
+	# Port/timeout are optional: keep existing value when omitted.
+	if [ -n "$port" ]; then
+		valid_uint "$port" 1 65535 || { emit_error "端口必须是 1~65535 的数字"; return 0; }
+	fi
+	if [ -n "$timeout" ]; then
+		valid_uint "$timeout" 1 30 || { emit_error "超时必须是 1~30 秒"; return 0; }
+	fi
+
+	# Values are strictly validated above, so they are shell/uci safe.
+	read_config
+	uci set "$CONFIG.main.ip=$ip" || { emit_error "写入配置失败"; return 0; }
+	[ -n "$port" ] && uci set "$CONFIG.main.port=$port"
+	[ -n "$timeout" ] && uci set "$CONFIG.main.timeout=$timeout"
+
+	if uci commit "$CONFIG"; then
+		emit_ok_msg "设备地址已保存"
+	else
+		emit_error "保存配置失败"
+	fi
+}
+
+emit_error() {
+	printf '{"ok":false,"msg":"%s"}\n' "$(json_escape "$1")"
+}
+
+emit_ok_msg() {
+	printf '{"ok":true,"msg":"%s"}\n' "$(json_escape "$1")"
+}
+
+# http_get <path>
+http_get() {
+	uclient-fetch -q --timeout="$CFG_TIMEOUT" -O - \
+		"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+}
+
+# http_post <path> <body>
+http_post() {
+	uclient-fetch -q --timeout="$CFG_TIMEOUT" --post-data="$2" -O - \
+		"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+}
+
+# Pass a JSON body through untouched, otherwise report connection error.
+# $1 = context message suffix
+output_body_or_error() {
+	if [ -n "$BODY" ]; then
+		printf '%s\n' "$BODY"
+	else
+		emit_error "无法连接开机卡（$CFG_IP），请检查设备与设置"
+	fi
+}
+
+do_status() {
+	read_config
+	BODY=$(http_get "/api/status")
+	output_body_or_error
+}
+
+do_power() {
+	local input type ms data
+
+	read -r input
+	type=$(printf '%s' "$input" | jsonfilter -e '@.type' 2>/dev/null)
+	ms=$(printf '%s' "$input" | jsonfilter -e '@.ms' 2>/dev/null)
+
+	case "$type" in
+		on | off | force)
+			;;
+		custom)
+			case "$ms" in
+				'' | *[!0-9]*)
+					emit_error "参数 ms 必须是数字"
+					return 0
+					;;
+			esac
+			if [ "$ms" -lt 100 ] || [ "$ms" -gt 15000 ]; then
+				emit_error "按键时长必须在 100~15000 毫秒之间"
+				return 0
+			fi
+			;;
+		*)
+			emit_error "无效的操作类型: $type"
+			return 0
+			;;
+	esac
+
+	read_config
+	data="type=$type"
+	[ "$type" = "custom" ] && data="$data&ms=$ms"
+
+	BODY=$(http_post "/api/power" "$data")
+	output_body_or_error
+}
+
+# The card reboots on these calls and usually drops the connection,
+# so a missing reply is treated as success, matching the original page.
+do_reset() {
+	read_config
+	BODY=$(http_post "/api/reset" "x=1")
+	if [ -n "$BODY" ]; then
+		printf '%s\n' "$BODY"
+	else
+		emit_ok_msg "开机卡正在重启"
+	fi
+}
+
+do_clear_wifi() {
+	read_config
+	BODY=$(http_post "/api/clear_wifi" "x=1")
+	if [ -n "$BODY" ]; then
+		printf '%s\n' "$BODY"
+	else
+		emit_ok_msg "WiFi 已清除，设备进入配网模式"
+	fi
+}
+
+case "${1:-}" in
+	list)
+		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{}}\n'
+		;;
+	call)
+		case "${2:-}" in
+			status)      do_status ;;
+			get_config)  do_get_config ;;
+			set_config)  do_set_config ;;
+			power)       do_power ;;
+			reset)       do_reset ;;
+			clear_wifi)  do_clear_wifi ;;
+			*)           printf '{}\n' ;;
+		esac
+		;;
+esac
+
+exit 0

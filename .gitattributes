@@ -1,0 +1,2 @@
+# All package payloads target Linux; force LF everywhere.
+* text=auto eol=lf

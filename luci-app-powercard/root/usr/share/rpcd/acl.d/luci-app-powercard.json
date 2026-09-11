@@ -1,0 +1,38 @@
+{
+	"luci-app-powercard": {
+		"description": "Grant access to the ESP8266 PC PowerCard control panel",
+		"read": {
+			"ubus": {
+				"powercard": [
+					"status",
+					"get_config"
+				],
+				"uci": [
+					"get"
+				]
+			},
+			"uci": [
+				"powercard"
+			]
+		},
+		"write": {
+			"ubus": {
+				"powercard": [
+					"set_config",
+					"power",
+					"reset",
+					"clear_wifi"
+				],
+				"uci": [
+					"set",
+					"commit",
+					"apply",
+					"order"
+				]
+			},
+			"uci": [
+				"powercard"
+			]
+		}
+	}
+}

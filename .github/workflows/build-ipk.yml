@@ -1,0 +1,60 @@
+# Build luci-app-powercard .ipk with the official OpenWrt SDK containers.
+# The package is architecture-independent (shell/JS/JSON, PKGARCH:=all),
+# so the produced file is luci-app-powercard_<ver>_all.ipk and installs on
+# ANY target (aarch64_cortex-a53 included). Two SDK releases are built to
+# cover routers on 23.05 and 24.10 (both still use the opkg/ipk format).
+
+name: Build ipk
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ipk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: SDK ${{ matrix.sdk }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - aarch64_cortex-a53-23.05.6
+          - aarch64_cortex-a53-24.10.8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build package with OpenWrt SDK
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.sdk }}
+          PACKAGES: luci-app-powercard
+
+      - name: Show built ipk
+        run: ls -l bin/packages/aarch64_cortex-a53/packages/*.ipk
+
+      - name: Upload ipk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-powercard-a53-${{ matrix.sdk }}
+          path: bin/packages/aarch64_cortex-a53/packages/*.ipk
+          if-no-files-found: error
+
+      # Pushing a tag (e.g. git tag v1.0.0 && git push --tags) also
+      # publishes the ipk files on a GitHub Release page.
+      - name: Publish release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/packages/aarch64_cortex-a53/packages/*.ipk
+          generate_release_notes: true

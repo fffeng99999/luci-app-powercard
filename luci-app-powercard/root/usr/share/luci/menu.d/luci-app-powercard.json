@@ -1,0 +1,15 @@
+{
+	"admin/services/powercard": {
+		"title": "电脑开机卡",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "powercard"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-powercard"
+			]
+		}
+	}
+}
