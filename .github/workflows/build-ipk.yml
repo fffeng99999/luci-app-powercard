@@ -51,9 +51,11 @@ jobs:
           if-no-files-found: error
 
       # Pushing a tag (e.g. git tag v1.0.0 && git push --tags) also
-      # publishes the ipk files on a GitHub Release page.
+      # publishes the ipk file on a GitHub Release page. The package is
+      # architecture-independent, so one upload from the 24.10 SDK job
+      # covers every device (both jobs keep their own CI artifacts).
       - name: Publish release on tag
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && matrix.sdk == 'aarch64_cortex-a53-24.10.8'
         uses: softprops/action-gh-release@v2
         with:
           files: bin/packages/aarch64_cortex-a53/packages/*.ipk
