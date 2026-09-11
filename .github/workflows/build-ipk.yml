@@ -9,6 +9,7 @@ name: Build ipk
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
     paths-ignore:
       - '**/*.md'
   workflow_dispatch: {}
@@ -41,13 +42,13 @@ jobs:
           PACKAGES: luci-app-powercard
 
       - name: Show built ipk
-        run: ls -l bin/packages/aarch64_cortex-a53/packages/*.ipk
+        run: ls -l bin/packages/aarch64_cortex-a53/**/*.ipk
 
       - name: Upload ipk artifact
         uses: actions/upload-artifact@v4
         with:
           name: luci-app-powercard-a53-${{ matrix.sdk }}
-          path: bin/packages/aarch64_cortex-a53/packages/*.ipk
+          path: bin/packages/aarch64_cortex-a53/**/*.ipk
           if-no-files-found: error
 
       # Pushing a tag (e.g. git tag v1.0.0 && git push --tags) also
@@ -58,5 +59,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') && matrix.sdk == 'aarch64_cortex-a53-24.10.8'
         uses: softprops/action-gh-release@v2
         with:
-          files: bin/packages/aarch64_cortex-a53/packages/*.ipk
+          files: bin/packages/aarch64_cortex-a53/**/*.ipk
           generate_release_notes: true
