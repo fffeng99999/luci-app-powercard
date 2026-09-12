@@ -10,10 +10,10 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-powercard
 PKG_VERSION:=1.0.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 LUCI_TITLE:=LuCI panel for ESP8266 PC PowerCard
-LUCI_DEPENDS:=+luci-base +rpcd +uclient-fetch +jsonfilter
+LUCI_DEPENDS:=+luci-base +rpcd +curl +uclient-fetch +jsonfilter
 LUCI_PKGARCH:=all
 
 define Package/$(PKG_NAME)/conffiles

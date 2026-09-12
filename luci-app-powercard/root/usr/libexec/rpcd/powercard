@@ -132,16 +132,39 @@ emit_ok_msg() {
 	printf '{"ok":true,"msg":"%s"}\n' "$(json_escape "$1")"
 }
 
+# HTTP transport: prefer curl. The card's tiny HTTP server rejects
+# POST requests made by some uclient-fetch builds (it requires an
+# explicit application/x-www-form-urlencoded Content-Type and is
+# picky about the request framing); curl works reliably.
+HAVE_CURL=0
+if [ -x /usr/bin/curl ]; then
+	HAVE_CURL=1
+fi
+
 # http_get <path>
 http_get() {
-	uclient-fetch -q --timeout="$CFG_TIMEOUT" -O - \
-		"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+	if [ "$HAVE_CURL" = 1 ]; then
+		curl -sS --max-time "$CFG_TIMEOUT" \
+			"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+	else
+		uclient-fetch -q --timeout="$CFG_TIMEOUT" -O - \
+			"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+	fi
 }
 
 # http_post <path> <body>
 http_post() {
-	uclient-fetch -q --timeout="$CFG_TIMEOUT" --post-data="$2" -O - \
-		"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+	if [ "$HAVE_CURL" = 1 ]; then
+		curl -sS --max-time "$CFG_TIMEOUT" \
+			-H 'Content-Type: application/x-www-form-urlencoded' \
+			--data "$2" \
+			"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+	else
+		uclient-fetch -q --timeout="$CFG_TIMEOUT" -O - \
+			--header='Content-Type: application/x-www-form-urlencoded' \
+			--post-data="$2" \
+			"http://$CFG_IP:$CFG_PORT$1" 2>/dev/null
+	fi
 }
 
 # Pass a JSON body through untouched, otherwise report connection error.
