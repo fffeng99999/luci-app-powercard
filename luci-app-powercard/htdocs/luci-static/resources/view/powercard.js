@@ -50,7 +50,7 @@ var callGetSchedule = rpc.declare({
 var callSetSchedule = rpc.declare({
 	object: 'powercard',
 	method: 'set_schedule',
-	params: ['rules']
+	params: ['rules', 'precheck']
 });
 
 var callGetWatchdog = rpc.declare({
@@ -625,10 +625,14 @@ var MARKUP =
 '	<div id="schedList"></div>' +
 '	<div class="sched-empty" id="schedEmpty" style="display:none">还没有定时规则，点击下方按钮添加</div>' +
 '	<button class="sched-add" id="btnSchedAdd">＋ 添加定时规则</button>' +
+'	<label class="wd-switch" style="margin-top:2px">' +
+'		<input type="checkbox" id="schedPrecheck"> 执行前检查电脑状态（已开机跳过开机、已关机跳过关机）' +
+'	</label>' +
 '	<button class="sched-save" id="btnSchedSave">💾 保存全部定时规则</button>' +
 '	<div class="hint-tip">' +
 '		ℹ️ 定时任务由路由器的 cron 执行，保存后生效。<br>' +
-'		关机动作发送 POWER 短按，若系统未开启 ACPI 软关机支持，可改用"强制关机"。<br>' +
+'		电源键是单一动作：已开机时再按会关机、已关机时再按会开机，因此建议保持"执行前检查"开启，状态已符合时自动跳过。<br>' +
+'		开机卡离线时定时任务会跳过并记录日志，不会盲发指令；"强制关机"始终执行。<br>' +
 '		路由器重启后 crontab 会自动恢复。' +
 '	</div>' +
 '</div>' +
@@ -1099,6 +1103,12 @@ return view.extend({
 					weekdays: self.toWeekMask(r.weekdays)
 				};
 			});
+
+			// 预检开关：后端缺省视为开启，仅显式 '0' 才关闭
+			var pre = self.$('schedPrecheck');
+			if (pre)
+				pre.checked = !(d && d.precheck === '0');
+
 			self.renderSchedule();
 		}).catch(function () {
 			self.renderSchedule();
@@ -1241,7 +1251,10 @@ return view.extend({
 			};
 		});
 
-		callSetSchedule(rules).then(function (d) {
+		var preEl = self.$('schedPrecheck');
+		var precheck = (preEl && preEl.checked) ? '1' : '0';
+
+		callSetSchedule(rules, precheck).then(function (d) {
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '定时规则已保存' : '保存失败'), !!d.ok);
 		}).catch(function (e) {

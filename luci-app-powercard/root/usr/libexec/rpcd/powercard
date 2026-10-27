@@ -12,6 +12,8 @@
 #		option timeout '5'
 #		option watchdog_enabled '1'   # force-off safety net
 #		option watchdog_minutes '10'  # grace period after a soft shutdown
+#		option sched_precheck  '1'    # skip scheduled on/off when the
+#		                              # PC already is in that state
 #
 # Scheduled power on/off rules live in /etc/config/powercard as
 # 'schedule' sections and are synced into the root crontab:
@@ -52,25 +54,28 @@ CFG_PORT="80"
 CFG_TIMEOUT="5"
 CFG_WATCHDOG_ENABLED="1"
 CFG_WATCHDOG_MINUTES="$DEFAULT_WATCHDOG_MINUTES"
+CFG_SCHED_PRECHECK="1"
 
 # Where the pending "soft shutdown was sent" marker lives. /tmp is a tmpfs:
 # it is cleared on router reboot, which is the desired behaviour.
 WATCHDOG_STATE="/tmp/powercard-watchdog"
 
 read_config() {
-	local ip port timeout wd_en wd_min
+	local ip port timeout wd_en wd_min pre
 
 	ip=$(uci -q get "$CONFIG.main.ip" 2>/dev/null)
 	port=$(uci -q get "$CONFIG.main.port" 2>/dev/null)
 	timeout=$(uci -q get "$CONFIG.main.timeout" 2>/dev/null)
 	wd_en=$(uci -q get "$CONFIG.main.watchdog_enabled" 2>/dev/null)
 	wd_min=$(uci -q get "$CONFIG.main.watchdog_minutes" 2>/dev/null)
+	pre=$(uci -q get "$CONFIG.main.sched_precheck" 2>/dev/null)
 
 	[ -n "$ip" ] && CFG_IP="$ip"
 	[ -n "$port" ] && CFG_PORT="$port"
 	[ -n "$timeout" ] && CFG_TIMEOUT="$timeout"
 	[ -n "$wd_en" ] && CFG_WATCHDOG_ENABLED="$wd_en"
 	[ -n "$wd_min" ] && CFG_WATCHDOG_MINUTES="$wd_min"
+	[ -n "$pre" ] && CFG_SCHED_PRECHECK="$pre"
 }
 
 # Minimal JSON string escaper (backslash / double quote).
@@ -346,9 +351,12 @@ sync_cron() {
 }
 
 do_get_schedule() {
-	local first=1 sec action tm weekdays enabled
+	local first=1 sec action tm weekdays enabled precheck
 
-	printf '{"rules":['
+	read_config
+	[ "$CFG_SCHED_PRECHECK" = "1" ] && precheck=1 || precheck=0
+
+	printf '{"precheck":"%s","rules":[' "$precheck"
 	for sec in $(schedule_sections); do
 		action=$(uci -q get "$CONFIG.$sec.action")
 		tm=$(uci -q get "$CONFIG.$sec.time")
@@ -434,11 +442,29 @@ do_set_schedule() {
 		return 0
 	fi
 
+	# The precheck switch is stored on the main section, saved alongside
+	# the rules so the frontend can keep both in one card.
+	local precheck
+	precheck=$(printf '%s' "$input" | jsonfilter -e '@.precheck' 2>/dev/null)
+	if [ -n "$precheck" ]; then
+		if [ "$precheck" = "0" ] || [ "$precheck" = "false" ]; then
+			uci set "$CONFIG.main.sched_precheck=0"
+		else
+			uci set "$CONFIG.main.sched_precheck=1"
+		fi
+		uci commit "$CONFIG" || { emit_error "保存设置失败"; return 0; }
+	fi
+
 	sync_cron
 	emit_ok_msg "定时规则已保存（共 $idx 条）"
 }
 
 # Invoked by cron. $1 = on|off|force. Runs standalone, outside rpcd.
+#
+# Before firing, the current power state is checked (unless disabled via
+# sched_precheck). The POWER pin is a single toggle, so sending "on" to a
+# machine that is already on - or "off" to one already off - would do the
+# wrong thing. In that case the scheduled action is skipped and logged.
 do_run_scheduled() {
 	local type="${1:-}"
 
@@ -448,6 +474,38 @@ do_run_scheduled() {
 	esac
 
 	read_config
+
+	# Pre-check: skip a redundant on/off. "force" always runs (it is the
+	# user's explicit "the machine is stuck, cut power" escape hatch).
+	if [ "$CFG_SCHED_PRECHECK" = "1" ] && [ "$type" != "force" ]; then
+		local pc_state
+		pc_state=$(read_pc_state)
+
+		case "$pc_state" in
+			on)
+				if [ "$type" = "on" ]; then
+					logger -t powercard \
+						"scheduled '$type' skipped: PC already on"
+					exit 0
+				fi
+				;;
+			off)
+				if [ "$type" = "off" ]; then
+					logger -t powercard \
+						"scheduled '$type' skipped: PC already off"
+					exit 0
+				fi
+				;;
+			unknown)
+				# Card unreachable: do not guess. Log and skip so we
+				# never fire a toggle against an unknown state.
+				logger -t powercard \
+					"scheduled '$type' skipped: power state unknown (card unreachable)"
+				exit 0
+				;;
+		esac
+	fi
+
 	local BODY
 	BODY=$(http_post "/api/power" "type=$type" 2>/dev/null)
 	[ -n "$BODY" ] ||
@@ -458,6 +516,24 @@ do_run_scheduled() {
 	[ "$type" = "off" ] && [ -n "$BODY" ] && watchdog_arm
 
 	exit 0
+}
+
+# Query the card and echo the PC power state as one of: on | off | unknown.
+# "unknown" means the card could not be reached or its reply was unusable,
+# so callers must not assume either state.
+read_pc_state() {
+	local body pc_on
+
+	body=$(http_get "/api/status")
+	[ -n "$body" ] || { printf 'unknown'; return 0; }
+
+	pc_on=$(printf '%s' "$body" | jsonfilter -e '@.pc_on' 2>/dev/null)
+
+	case "$pc_on" in
+		true | 1) printf 'on' ;;
+		false | 0) printf 'off' ;;
+		*) printf 'unknown' ;;
+	esac
 }
 
 # ---------------------------------------------------------------------------
@@ -737,7 +813,7 @@ do_clear_wifi() {
 
 case "${1:-}" in
 	list)
-		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{},"get_schedule":{},"set_schedule":{"rules":[]},"get_watchdog":{},"set_watchdog":{"enabled":"","minutes":0}}\n'
+		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{},"get_schedule":{},"set_schedule":{"rules":[],"precheck":""},"get_watchdog":{},"set_watchdog":{"enabled":"","minutes":0}}\n'
 		;;
 	call)
 		case "${2:-}" in
