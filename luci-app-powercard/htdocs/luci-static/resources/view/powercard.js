@@ -42,7 +42,30 @@ var callClearWifi = rpc.declare({
 	method: 'clear_wifi'
 });
 
+var callGetSchedule = rpc.declare({
+	object: 'powercard',
+	method: 'get_schedule'
+});
+
+var callSetSchedule = rpc.declare({
+	object: 'powercard',
+	method: 'set_schedule',
+	params: ['rules']
+});
+
+var callGetWatchdog = rpc.declare({
+	object: 'powercard',
+	method: 'get_watchdog'
+});
+
+var callSetWatchdog = rpc.declare({
+	object: 'powercard',
+	method: 'set_watchdog',
+	params: ['enabled', 'minutes']
+});
+
 var pollTimer = null;
+var wdTimer = null;
 
 var STYLES =
 '#pcapp, #pcapp * {' +
@@ -328,6 +351,180 @@ var STYLES =
 '	line-height: 1.7;' +
 '}' +
 '#pcapp .hw-debug b { color: #334155; }' +
+'#pcapp .sched-item {' +
+'	border: 1px solid #e5e7eb;' +
+'	border-radius: 12px;' +
+'	padding: 12px;' +
+'	margin-bottom: 10px;' +
+'	background: #fafafa;' +
+'}' +
+'#pcapp .sched-item.disabled { opacity: .55; }' +
+'#pcapp .sched-row {' +
+'	display: flex;' +
+'	gap: 8px;' +
+'	align-items: center;' +
+'	flex-wrap: wrap;' +
+'}' +
+'#pcapp .sched-row input[type="time"] {' +
+'	padding: 8px 10px;' +
+'	border: 1px solid #e5e7eb;' +
+'	border-radius: 10px;' +
+'	font-size: 14px;' +
+'	outline: none;' +
+'	background: #fff;' +
+'	font-family: ui-monospace, Consolas, monospace;' +
+'}' +
+'#pcapp .sched-row input[type="time"]:focus,' +
+'#pcapp .sched-row select:focus { border-color: #6366f1; }' +
+'#pcapp .sched-row select {' +
+'	padding: 8px 10px;' +
+'	border: 1px solid #e5e7eb;' +
+'	border-radius: 10px;' +
+'	font-size: 14px;' +
+'	outline: none;' +
+'	background: #fff;' +
+'	color: #374151;' +
+'}' +
+'#pcapp .sched-del {' +
+'	margin-left: auto;' +
+'	border: none;' +
+'	background: none;' +
+'	color: #dc2626;' +
+'	font-size: 18px;' +
+'	cursor: pointer;' +
+'	padding: 4px 8px;' +
+'	line-height: 1;' +
+'}' +
+'#pcapp .sched-days {' +
+'	display: flex;' +
+'	gap: 4px;' +
+'	margin-top: 8px;' +
+'}' +
+'#pcapp .sched-days button {' +
+'	flex: 1;' +
+'	padding: 6px 0;' +
+'	border: 1px solid #e5e7eb;' +
+'	border-radius: 8px;' +
+'	background: #fff;' +
+'	color: #6b7280;' +
+'	font-size: 12px;' +
+'	cursor: pointer;' +
+'	transition: .12s all;' +
+'}' +
+'#pcapp .sched-days button.sel {' +
+'	background: #6366f1;' +
+'	border-color: #6366f1;' +
+'	color: #fff;' +
+'	font-weight: 600;' +
+'}' +
+'#pcapp .sched-toggle {' +
+'	display: flex;' +
+'	align-items: center;' +
+'	gap: 6px;' +
+'	font-size: 12px;' +
+'	color: #6b7280;' +
+'	cursor: pointer;' +
+'	user-select: none;' +
+'}' +
+'#pcapp .sched-add {' +
+'	width: 100%;' +
+'	padding: 12px;' +
+'	border: 1px dashed #c7d2fe;' +
+'	border-radius: 12px;' +
+'	background: #eef2ff;' +
+'	color: #4f46e5;' +
+'	font-size: 14px;' +
+'	font-weight: 600;' +
+'	cursor: pointer;' +
+'	margin-bottom: 12px;' +
+'}' +
+'#pcapp .sched-add:active { transform: scale(.98); }' +
+'#pcapp .sched-empty {' +
+'	text-align: center;' +
+'	color: #9ca3af;' +
+'	font-size: 13px;' +
+'	padding: 10px 0 14px;' +
+'}' +
+'#pcapp .sched-save {' +
+'	width: 100%;' +
+'	padding: 14px;' +
+'	border: none;' +
+'	border-radius: 12px;' +
+'	background: linear-gradient(135deg, #6366f1, #4f46e5);' +
+'	box-shadow: 0 6px 20px rgba(99,102,241,.35);' +
+'	color: #fff;' +
+'	font-size: 15px;' +
+'	font-weight: 600;' +
+'	cursor: pointer;' +
+'}' +
+'#pcapp .sched-save:active { transform: scale(.98); }' +
+'#pcapp .sched-save:disabled { opacity: .5; cursor: default; }' +
+'#pcapp .sched-summary {' +
+'	margin-top: 8px;' +
+'	font-size: 12px;' +
+'	color: #6b7280;' +
+'}' +
+'/* Native time inputs stay white-on-white in LuCI dark themes. */' +
+'#pcapp input[type="time"] { color-scheme: light dark; }' +
+'#pcapp .wd-row {' +
+'	display: flex;' +
+'	gap: 10px;' +
+'	align-items: center;' +
+'	flex-wrap: wrap;' +
+'}' +
+'#pcapp .wd-row input[type="number"] {' +
+'	width: 90px;' +
+'	padding: 10px 14px;' +
+'	border: 1px solid #e5e7eb;' +
+'	border-radius: 10px;' +
+'	font-size: 14px;' +
+'	outline: none;' +
+'	background: #fff;' +
+'	color: #374151;' +
+'}' +
+'#pcapp .wd-row input[type="number"]:focus { border-color: #6366f1; }' +
+'#pcapp .wd-row span { color: #6b7280; font-size: 13px; }' +
+'#pcapp .wd-switch {' +
+'	display: flex;' +
+'	align-items: center;' +
+'	gap: 8px;' +
+'	font-size: 14px;' +
+'	color: #374151;' +
+'	cursor: pointer;' +
+'	user-select: none;' +
+'	margin-bottom: 12px;' +
+'	font-weight: 600;' +
+'}' +
+'#pcapp .wd-switch input {' +
+'	width: 18px;' +
+'	height: 18px;' +
+'	accent-color: #6366f1;' +
+'	cursor: pointer;' +
+'}' +
+'#pcapp .wd-state {' +
+'	margin-top: 10px;' +
+'	font-size: 12px;' +
+'	color: #92400e;' +
+'	background: #fffbeb;' +
+'	border-radius: 8px;' +
+'	padding: 8px 12px;' +
+'	display: none;' +
+'}' +
+'#pcapp .wd-state.show { display: block; }' +
+'#pcapp .wd-save {' +
+'	margin-top: 12px;' +
+'	padding: 10px 22px;' +
+'	border: none;' +
+'	border-radius: 10px;' +
+'	background: linear-gradient(135deg, #6366f1, #4f46e5);' +
+'	color: #fff;' +
+'	font-size: 14px;' +
+'	font-weight: 600;' +
+'	cursor: pointer;' +
+'	white-space: nowrap;' +
+'}' +
+'#pcapp .wd-save:active { transform: scale(.97); }' +
+'#pcapp .wd-save:disabled { opacity: .5; cursor: default; }' +
 '#pcapp .footer {' +
 '	text-align: center;' +
 '	font-size: 11px;' +
@@ -405,6 +602,38 @@ var MARKUP =
 '</div>' +
 
 '<div class="card">' +
+'	<div class="section-title">🛡 关机保护（强制断电兜底）</div>' +
+'	<label class="wd-switch">' +
+'		<input type="checkbox" id="wdEnabled"> 启用关机保护' +
+'	</label>' +
+'	<div class="wd-row">' +
+'		<span>软关机后等待</span>' +
+'		<input id="wdMinutes" type="number" min="1" max="180" step="1" value="10">' +
+'		<span>分钟，若电脑仍未关机则强制断电</span>' +
+'	</div>' +
+'	<div class="wd-state" id="wdState"></div>' +
+'	<button class="wd-save" id="btnWdSave">💾 保存关机保护设置</button>' +
+'	<div class="hint-tip">' +
+'		ℹ️ 适用于"系统已关闭但主机风扇仍转"的情况。<br>' +
+'		手动点击"关机"或定时关机后自动开始计时，到点若开机卡仍检测到电脑通电，会自动长按 POWER 6 秒强制断电。<br>' +
+'		期间手动开机或强制关机会自动取消计时。计时由路由器 cron 每分钟检查一次，路由器重启后计时自动清零。' +
+'	</div>' +
+'</div>' +
+
+'<div class="card">' +
+'	<div class="section-title">⏰ 定时开关机</div>' +
+'	<div id="schedList"></div>' +
+'	<div class="sched-empty" id="schedEmpty" style="display:none">还没有定时规则，点击下方按钮添加</div>' +
+'	<button class="sched-add" id="btnSchedAdd">＋ 添加定时规则</button>' +
+'	<button class="sched-save" id="btnSchedSave">💾 保存全部定时规则</button>' +
+'	<div class="hint-tip">' +
+'		ℹ️ 定时任务由路由器的 cron 执行，保存后生效。<br>' +
+'		关机动作发送 POWER 短按，若系统未开启 ACPI 软关机支持，可改用"强制关机"。<br>' +
+'		路由器重启后 crontab 会自动恢复。' +
+'	</div>' +
+'</div>' +
+
+'<div class="card">' +
 '	<div class="section-title">🔌 硬件状态</div>' +
 '	<div class="hw-debug">' +
 '		<div><b>GPIO12 POWER_OUT：</b><span id="gpio12">—</span></div>' +
@@ -446,6 +675,10 @@ return view.extend({
 			clearInterval(pollTimer);
 			pollTimer = null;
 		}
+		if (wdTimer) {
+			clearInterval(wdTimer);
+			wdTimer = null;
+		}
 
 		var root = E('div', { id: 'pcapp', class: 'wrap' });
 		root.innerHTML = MARKUP;
@@ -453,6 +686,8 @@ return view.extend({
 
 		setTimeout(this.refresh.bind(this), 50);
 		setTimeout(this.loadConfig.bind(this), 50);
+		setTimeout(this.loadSchedule.bind(this), 60);
+		setTimeout(this.loadWatchdog.bind(this), 60);
 		pollTimer = setInterval(this.refresh.bind(this), 3000);
 
 		return root;
@@ -473,6 +708,8 @@ return view.extend({
 			lastFetch: 0
 		};
 
+		this.schedRules = [];
+
 		this.$('btnOn').addEventListener('click', function () { this.doAction('on'); }.bind(this));
 		this.$('btnOff').addEventListener('click', function () { this.doAction('off'); }.bind(this));
 		this.$('btnForce').addEventListener('click', function () { this.doAction('force'); }.bind(this));
@@ -484,6 +721,9 @@ return view.extend({
 			if (ev.key === 'Enter')
 				this.saveConfig();
 		}.bind(this));
+		this.$('btnSchedAdd').addEventListener('click', this.addSchedRule.bind(this));
+		this.$('btnSchedSave').addEventListener('click', this.saveSchedule.bind(this));
+		this.$('btnWdSave').addEventListener('click', this.saveWatchdog.bind(this));
 	},
 
 	validIp: function (s) {
@@ -769,6 +1009,346 @@ return view.extend({
 			self.toast(d.msg || 'WiFi 已清除，设备正在重启...', true);
 		}).catch(function () {
 			self.toast('设备正在重启并进入配网模式', true);
+		});
+	},
+
+	/* ------------------------------------------------------------------ */
+	/* 定时开关机                                                          */
+	/* ------------------------------------------------------------------ */
+
+	DAY_LABELS: ['日', '一', '二', '三', '四', '五', '六'],
+
+	ACTION_LABELS: {
+		on: '🔋 开机',
+		off: '⛔ 关机',
+		force: '⚠️ 强制关机'
+	},
+
+	// 后端同时接受 7 位掩码（位置 0=周日）与 cron 列表，这里统一为掩码。
+	toWeekMask: function (v) {
+		var mask = [0, 0, 0, 0, 0, 0, 0], i, tok, a, b;
+
+		if (!v || v === '*')
+			return '1111111';
+
+		if (/^[01]{7}$/.test(v))
+			return v;
+
+		var parts = String(v).split(',');
+		for (i = 0; i < parts.length; i++) {
+			tok = parts[i];
+			if (/^\d$/.test(tok)) {
+				a = parseInt(tok, 10) % 7;
+				mask[a] = 1;
+			} else if (/^\d-\d$/.test(tok)) {
+				a = parseInt(tok.charAt(0), 10) % 7;
+				b = parseInt(tok.charAt(2), 10) % 7;
+				if (a <= b) {
+					for (; a <= b; a++)
+						mask[a] = 1;
+				} else {
+					// 环绕范围，如 5-1（周五~周一）
+					for (; a <= 6; a++)
+						mask[a] = 1;
+					for (a = 0; a <= b; a++)
+						mask[a] = 1;
+				}
+			}
+		}
+
+		return mask.join('');
+	},
+
+	weekMaskText: function (mask) {
+		if (mask === '1111111')
+			return '每天';
+
+		var i, sel = [];
+		for (i = 0; i < 7; i++) {
+			if (mask.charAt(i) === '1')
+				sel.push(this.DAY_LABELS[i]);
+		}
+
+		if (sel.length === 0)
+			return '未选择';
+
+		// 常见组合的简写
+		var s = sel.join('');
+		if (s === '一二三四五') return '工作日';
+		if (s === '日六') return '周末';
+
+		return '周' + sel.join('、周');
+	},
+
+	loadSchedule: function () {
+		var self = this;
+
+		if (!self.root || !self.root.isConnected)
+			return;
+
+		callGetSchedule().then(function (d) {
+			if (!self.root.isConnected)
+				return;
+
+			var rules = (d && d.rules) || [];
+			self.schedRules = rules.map(function (r) {
+				return {
+					enabled: r.enabled !== '0',
+					time: r.time || '08:00',
+					action: r.action || 'on',
+					weekdays: self.toWeekMask(r.weekdays)
+				};
+			});
+			self.renderSchedule();
+		}).catch(function () {
+			self.renderSchedule();
+		});
+	},
+
+	renderSchedule: function () {
+		var self = this;
+		var list = self.$('schedList');
+		var empty = self.$('schedEmpty');
+
+		list.innerHTML = '';
+		empty.style.display = self.schedRules.length ? 'none' : '';
+
+		self.schedRules.forEach(function (rule, idx) {
+			var item = E('div', { class: 'sched-item' + (rule.enabled ? '' : ' disabled') });
+
+			var summary = E('div', { class: 'sched-summary' });
+
+			var updSummary = function () {
+				summary.textContent = (rule.enabled ? '' : '已停用 · ') +
+					rule.time + ' · ' + self.weekMaskText(rule.weekdays) +
+					' · ' + self.ACTION_LABELS[rule.action];
+			};
+			updSummary();
+
+			var row = E('div', { class: 'sched-row' });
+
+			var chk = E('input', { type: 'checkbox' });
+			chk.checked = rule.enabled;
+			chk.addEventListener('change', function () {
+				rule.enabled = chk.checked;
+				item.classList.toggle('disabled', !rule.enabled);
+				updSummary();
+			});
+
+			var lbl = E('label', { class: 'sched-toggle' });
+			lbl.appendChild(chk);
+			lbl.appendChild(document.createTextNode('启用'));
+
+			var timeInput = E('input', { type: 'time' });
+			timeInput.value = rule.time;
+			timeInput.addEventListener('change', function () {
+				rule.time = timeInput.value || '08:00';
+				updSummary();
+			});
+
+			var sel = E('select');
+			['on', 'off', 'force'].forEach(function (act) {
+				var opt = E('option', { value: act });
+				opt.textContent = self.ACTION_LABELS[act];
+				if (act === rule.action)
+					opt.selected = true;
+				sel.appendChild(opt);
+			});
+			sel.addEventListener('change', function () {
+				rule.action = sel.value;
+				updSummary();
+			});
+
+			var del = E('button', { class: 'sched-del', title: '删除' });
+			del.textContent = '✕';
+			del.addEventListener('click', function () {
+				self.schedRules.splice(idx, 1);
+				self.renderSchedule();
+			});
+
+			row.appendChild(lbl);
+			row.appendChild(timeInput);
+			row.appendChild(sel);
+			row.appendChild(del);
+
+			var days = E('div', { class: 'sched-days' });
+			for (var d = 0; d < 7; d++) {
+				(function (pos) {
+					var btn = E('button', { type: 'button' });
+					btn.textContent = self.DAY_LABELS[pos];
+					if (rule.weekdays.charAt(pos) === '1')
+						btn.classList.add('sel');
+					btn.addEventListener('click', function () {
+						var m = rule.weekdays.split('');
+						m[pos] = m[pos] === '1' ? '0' : '1';
+						rule.weekdays = m.join('');
+						btn.classList.toggle('sel', m[pos] === '1');
+						updSummary();
+					});
+					days.appendChild(btn);
+				})(d);
+			}
+
+			item.appendChild(row);
+			item.appendChild(days);
+			item.appendChild(summary);
+			list.appendChild(item);
+		});
+	},
+
+	addSchedRule: function () {
+		if (this.schedRules.length >= 32) {
+			this.toast('最多支持 32 条定时规则', false);
+			return;
+		}
+
+		this.schedRules.push({
+			enabled: true,
+			time: '08:00',
+			action: 'on',
+			weekdays: '1111111'
+		});
+		this.renderSchedule();
+	},
+
+	saveSchedule: function () {
+		var self = this;
+		var btn = self.$('btnSchedSave');
+
+		// 本地校验：时间必须完整，且启用的规则至少选一天
+		for (var i = 0; i < self.schedRules.length; i++) {
+			var r = self.schedRules[i];
+
+			if (!/^\d{2}:\d{2}$/.test(r.time || '')) {
+				self.toast('第 ' + (i + 1) + ' 条规则的时间不完整', false);
+				return;
+			}
+			if (r.enabled && r.weekdays.indexOf('1') === -1) {
+				self.toast('第 ' + (i + 1) + ' 条规则至少要选择一个重复日', false);
+				return;
+			}
+		}
+
+		btn.disabled = true;
+		btn.textContent = '保存中...';
+
+		var rules = self.schedRules.map(function (r) {
+			return {
+				enabled: r.enabled ? '1' : '0',
+				time: r.time,
+				action: r.action,
+				weekdays: r.weekdays
+			};
+		});
+
+		callSetSchedule(rules).then(function (d) {
+			d = d || {};
+			self.toast(d.msg || (d.ok ? '定时规则已保存' : '保存失败'), !!d.ok);
+		}).catch(function (e) {
+			self.toast('保存失败：' + (e && e.message ? e.message : 'RPC 错误'), false);
+		}).then(function () {
+			btn.disabled = false;
+			btn.textContent = '💾 保存全部定时规则';
+		});
+	},
+
+	/* ------------------------------------------------------------------ */
+	/* 关机保护（强制断电兜底）                                            */
+	/* ------------------------------------------------------------------ */
+
+	fmtCountdown: function (sec) {
+		sec = Math.max(0, Math.floor(sec));
+		var m = Math.floor(sec / 60),
+		    s = sec % 60;
+		return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+	},
+
+	updateWatchdogState: function (d) {
+		var el = this.$('wdState');
+
+		if (!el)
+			return;
+
+		if (d.armed && d.enabled === '1') {
+			el.classList.add('show');
+			el.textContent = '⏳ 已检测到软关机指令，剩余 ' +
+				this.fmtCountdown(d.remaining) +
+				' 后若电脑仍未关闭将自动强制断电';
+		} else {
+			el.classList.remove('show');
+			el.textContent = '';
+		}
+	},
+
+	loadWatchdog: function () {
+		var self = this;
+
+		if (!self.root || !self.root.isConnected)
+			return;
+
+		callGetWatchdog().then(function (d) {
+			if (!d || !self.root.isConnected)
+				return;
+
+			var chk = self.$('wdEnabled'),
+			    inp = self.$('wdMinutes');
+
+			chk.checked = (d.enabled === '1');
+			inp.value = d.minutes || '10';
+
+			self.updateWatchdogState(d);
+
+			// Poll while a timer is pending so the countdown ticks down.
+			if (wdTimer) {
+				clearInterval(wdTimer);
+				wdTimer = null;
+			}
+			if (d.armed && d.enabled === '1') {
+				wdTimer = setInterval(function () {
+					if (!self.root || !self.root.isConnected) {
+						clearInterval(wdTimer);
+						wdTimer = null;
+						return;
+					}
+					callGetWatchdog().then(function (d2) {
+						if (!d2 || !self.root.isConnected)
+							return;
+						self.updateWatchdogState(d2);
+						if (!d2.armed && wdTimer) {
+							clearInterval(wdTimer);
+							wdTimer = null;
+						}
+					}).catch(function () {});
+				}, 10000);
+			}
+		}).catch(function () {});
+	},
+
+	saveWatchdog: function () {
+		var self = this;
+		var btn = self.$('btnWdSave');
+		var enabled = self.$('wdEnabled').checked ? '1' : '0';
+		var minutes = parseInt(self.$('wdMinutes').value, 10);
+
+		if (isNaN(minutes) || minutes < 1 || minutes > 180) {
+			self.toast('等待时间必须是 1~180 分钟', false);
+			self.$('wdMinutes').focus();
+			return;
+		}
+
+		btn.disabled = true;
+		btn.textContent = '保存中...';
+
+		callSetWatchdog(enabled, minutes).then(function (d) {
+			d = d || {};
+			self.toast(d.msg || (d.ok ? '关机保护设置已保存' : '保存失败'), !!d.ok);
+			if (d.ok)
+				self.loadWatchdog();
+		}).catch(function (e) {
+			self.toast('保存失败：' + (e && e.message ? e.message : 'RPC 错误'), false);
+		}).then(function () {
+			btn.disabled = false;
+			btn.textContent = '💾 保存关机保护设置';
 		});
 	}
 });

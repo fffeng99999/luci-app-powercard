@@ -10,12 +10,33 @@
 #		option ip      '192.168.58.246'
 #		option port    '80'
 #		option timeout '5'
+#		option watchdog_enabled '1'   # force-off safety net
+#		option watchdog_minutes '10'  # grace period after a soft shutdown
+#
+# Scheduled power on/off rules live in /etc/config/powercard as
+# 'schedule' sections and are synced into the root crontab:
+#	config schedule
+#		option enabled  '1'
+#		option time     '08:00'
+#		option action   'on'          # on | off | force
+#		option weekdays '1,2,3,4,5'  # cron style, 0=Sunday
 #
 # Manual test:
 #	echo '{}' | ubus call powercard status
 #	echo '{"type":"on"}' | ubus call powercard power
 #	echo '{"type":"custom","ms":2000}' | ubus call powercard power
 #	echo '{}' | ubus call powercard reset
+#	echo '{}' | ubus call powercard get_schedule
+#	echo '{"count":1,"rules":[{"enabled":"1","time":"08:00","action":"on","weekdays":"1,2,3,4,5"}]}' \
+#		| ubus call powercard set_schedule
+#	echo '{}' | ubus call powercard get_watchdog
+#	echo '{"enabled":"1","minutes":"10"}' | ubus call powercard set_watchdog
+#
+# The same script is invoked directly (not via rpcd) by cron and by the
+# package postinst:
+#	/usr/libexec/rpcd/powercard run_scheduled on   # scheduled action
+#	/usr/libexec/rpcd/powercard watchdog_tick      # every minute
+#	/usr/libexec/rpcd/powercard ensure_cron        # (re)install cron lines
 
 set -u
 
@@ -24,21 +45,32 @@ export PATH
 
 CONFIG="powercard"
 DEFAULT_IP="192.168.58.246"
+DEFAULT_WATCHDOG_MINUTES="10"
 
 CFG_IP="$DEFAULT_IP"
 CFG_PORT="80"
 CFG_TIMEOUT="5"
+CFG_WATCHDOG_ENABLED="1"
+CFG_WATCHDOG_MINUTES="$DEFAULT_WATCHDOG_MINUTES"
+
+# Where the pending "soft shutdown was sent" marker lives. /tmp is a tmpfs:
+# it is cleared on router reboot, which is the desired behaviour.
+WATCHDOG_STATE="/tmp/powercard-watchdog"
 
 read_config() {
-	local ip port timeout
+	local ip port timeout wd_en wd_min
 
 	ip=$(uci -q get "$CONFIG.main.ip" 2>/dev/null)
 	port=$(uci -q get "$CONFIG.main.port" 2>/dev/null)
 	timeout=$(uci -q get "$CONFIG.main.timeout" 2>/dev/null)
+	wd_en=$(uci -q get "$CONFIG.main.watchdog_enabled" 2>/dev/null)
+	wd_min=$(uci -q get "$CONFIG.main.watchdog_minutes" 2>/dev/null)
 
 	[ -n "$ip" ] && CFG_IP="$ip"
 	[ -n "$port" ] && CFG_PORT="$port"
 	[ -n "$timeout" ] && CFG_TIMEOUT="$timeout"
+	[ -n "$wd_en" ] && CFG_WATCHDOG_ENABLED="$wd_en"
+	[ -n "$wd_min" ] && CFG_WATCHDOG_MINUTES="$wd_min"
 }
 
 # Minimal JSON string escaper (backslash / double quote).
@@ -82,6 +114,112 @@ valid_uint() {
 			;;
 	esac
 	[ "$1" -ge "$2" ] 2>/dev/null && [ "$1" -le "$3" ] 2>/dev/null
+}
+
+# HH:MM, 24-hour clock. Returns 0 when valid.
+valid_time() {
+	local hh mm
+
+	case "$1" in
+		[0-9][0-9]:[0-9][0-9]) ;;
+		*) return 1 ;;
+	esac
+
+	hh=${1%%:*}
+	mm=${1##*:}
+
+	# Strip one leading zero; keeps "08"/"09" out of octal territory.
+	hh=${hh#0}
+	mm=${mm#0}
+	[ -n "$hh" ] || hh=0
+	[ -n "$mm" ] || mm=0
+
+	[ "$hh" -le 23 ] && [ "$mm" -le 59 ]
+}
+
+# "HH:MM" -> "HH MM" with leading zeros stripped, for the cron fields.
+time_to_cron() {
+	local hh mm
+
+	hh=${1%%:*}
+	mm=${1##*:}
+	hh=${hh#0}
+	mm=${mm#0}
+	[ -n "$hh" ] || hh=0
+	[ -n "$mm" ] || mm=0
+
+	printf '%s %s' "$hh" "$mm"
+}
+
+# Day-of-week specification. Two accepted forms:
+#   7-char mask "1111100"  - position 0..6 = Sunday..Saturday, 1=selected
+#   cron list   "0,6" / "*" - digits 0-7 (0 and 7 = Sunday), commas, ranges
+# Returns 0 when valid.
+valid_weekdays() {
+	local part="$1" tok oldifs
+
+	[ "$part" = "*" ] && return 0
+
+	# 7-bit mask form
+	case "$part" in
+		[01][01][01][01][01][01][01])
+			return 0
+			;;
+	esac
+
+	# Cron list form
+	case "$part" in
+		'' | *[!0-7,\-]*)
+			return 1
+			;;
+	esac
+
+	oldifs="$IFS"
+	IFS=','
+	for tok in $part; do
+		case "$tok" in
+			[0-7]) ;;
+			[0-7]-[0-7])
+				[ "${tok%%-*}" -le "${tok##*-}" ] || { IFS="$oldifs"; return 1; }
+				;;
+			*) IFS="$oldifs"; return 1 ;;
+		esac
+	done
+	IFS="$oldifs"
+
+	return 0
+}
+
+# Expand any accepted weekday form to a cron day-of-week field.
+weekdays_to_cron() {
+	local part="$1" out="" i=0 rest c
+
+	if [ "$part" = "*" ]; then
+		printf '*'
+		return 0
+	fi
+
+	case "$part" in
+		[01][01][01][01][01][01][01])
+			rest="$part"
+			while [ -n "$rest" ]; do
+				# c = first char of rest (ash has no ${s:i:1})
+				c=${rest%"${rest#?}"}
+				[ "$c" = "1" ] && out="$out,$i"
+				rest=${rest#?}
+				i=$((i + 1))
+			done
+			out=${out#,}
+			if [ -z "$out" ]; then
+				printf '*'
+			else
+				printf '%s' "$out"
+			fi
+			return 0
+			;;
+	esac
+
+	printf '%s' "$part"
 }
 
 do_get_config() {
@@ -131,6 +269,353 @@ emit_error() {
 emit_ok_msg() {
 	printf '{"ok":true,"msg":"%s"}\n' "$(json_escape "$1")"
 }
+
+# ---------------------------------------------------------------------------
+# Scheduled power on/off (multiple rules -> /etc/crontabs/root)
+# ---------------------------------------------------------------------------
+
+CRON_TAG="# powercard-schedule"
+MAX_RULES=32
+CRON_HELPER="/usr/libexec/rpcd/powercard"
+
+# Names of all schedule sections currently stored in uci.
+schedule_sections() {
+	uci -q show "$CONFIG" 2>/dev/null |
+		sed -n "s/^$CONFIG\.\([A-Za-z0-9_]*\)=schedule$/\1/p"
+}
+
+# Rebuild the powercard block inside the root crontab from uci.
+sync_cron() {
+	local crontab="/etc/crontabs/root" tmp sec action tm weekdays dow enabled
+	local hh mm hm
+
+	tmp=$(mktemp /tmp/powercard-cron.XXXXXX) || return 1
+
+	# Keep every existing line that does not belong to this plugin.
+	if [ -f "$crontab" ]; then
+		grep -vF "$CRON_TAG" "$crontab" > "$tmp" 2>/dev/null
+	else
+		: > "$tmp"
+	fi
+
+	for sec in $(schedule_sections); do
+		enabled=$(uci -q get "$CONFIG.$sec.enabled")
+		[ "$enabled" = "0" ] && continue
+
+		action=$(uci -q get "$CONFIG.$sec.action")
+		tm=$(uci -q get "$CONFIG.$sec.time")
+		weekdays=$(uci -q get "$CONFIG.$sec.weekdays")
+
+		valid_time "$tm" || continue
+		[ -n "$weekdays" ] || weekdays="*"
+		valid_weekdays "$weekdays" || continue
+
+		case "$action" in
+			on | off | force) ;;
+			*) continue ;;
+		esac
+
+		dow=$(weekdays_to_cron "$weekdays")
+		hm=$(time_to_cron "$tm")
+		hh=${hm%% *}
+		mm=${hm##* }
+
+		printf '%s %s * * %s %s run_scheduled %s %s\n' \
+			"$mm" "$hh" "$dow" "$CRON_HELPER" "$action" "$CRON_TAG" >> "$tmp"
+	done
+
+	# Per-minute shutdown-watchdog tick (only when the feature is on).
+	read_config
+	if [ "$CFG_WATCHDOG_ENABLED" = "1" ]; then
+		printf '* * * * * %s watchdog_tick %s\n' \
+			"$CRON_HELPER" "$CRON_TAG" >> "$tmp"
+	fi
+
+	mkdir -p /etc/crontabs 2>/dev/null
+	cat "$tmp" > "$crontab"
+	chmod 0600 "$crontab" 2>/dev/null
+	rm -f "$tmp"
+
+	# busybox crond picks up changes on restart; also enable it so the
+	# crontab survives a router reboot.
+	if [ -x /etc/init.d/cron ]; then
+		/etc/init.d/cron enable >/dev/null 2>&1
+		/etc/init.d/cron restart >/dev/null 2>&1
+	fi
+	return 0
+}
+
+do_get_schedule() {
+	local first=1 sec action tm weekdays enabled
+
+	printf '{"rules":['
+	for sec in $(schedule_sections); do
+		action=$(uci -q get "$CONFIG.$sec.action")
+		tm=$(uci -q get "$CONFIG.$sec.time")
+		weekdays=$(uci -q get "$CONFIG.$sec.weekdays")
+		enabled=$(uci -q get "$CONFIG.$sec.enabled")
+
+		[ -n "$weekdays" ] || weekdays="*"
+		[ "$enabled" = "0" ] || enabled="1"
+
+		[ $first -eq 1 ] || printf ','
+		first=0
+		printf '{"id":"%s","enabled":"%s","time":"%s","action":"%s","weekdays":"%s"}' \
+			"$sec" "$enabled" "$tm" "$action" "$weekdays"
+	done
+	printf ']}\n'
+}
+
+# Input: {"rules":[{"enabled":"1","time":"08:00","action":"on","weekdays":"1-5"},...]}
+# The list fully replaces the stored schedule.
+do_set_schedule() {
+	local input idx=0 n=0 action tm weekdays enabled sec
+
+	read -r input
+
+	# jsonfilter exposes neither array length nor multiple expressions,
+	# so probe the indexes one field at a time and validate as we go.
+	while :; do
+		action=$(printf '%s' "$input" | jsonfilter -e "@.rules[$idx].action" 2>/dev/null)
+		tm=$(printf '%s' "$input" | jsonfilter -e "@.rules[$idx].time" 2>/dev/null)
+
+		[ -n "$action" ] || [ -n "$tm" ] || break
+
+		if [ "$idx" -ge "$MAX_RULES" ]; then
+			emit_error "最多支持 $MAX_RULES 条定时规则"
+			return 0
+		fi
+
+		weekdays=$(printf '%s' "$input" | jsonfilter -e "@.rules[$idx].weekdays" 2>/dev/null)
+		enabled=$(printf '%s' "$input" | jsonfilter -e "@.rules[$idx].enabled" 2>/dev/null)
+
+		[ -n "$weekdays" ] || weekdays="*"
+
+		valid_time "$tm" || { emit_error "第 $((idx + 1)) 条规则的时间格式不正确（应为 HH:MM）"; return 0; }
+		case "$action" in
+			on | off | force) ;;
+			*) emit_error "第 $((idx + 1)) 条规则的动作无效"; return 0 ;;
+		esac
+		valid_weekdays "$weekdays" || { emit_error "第 $((idx + 1)) 条规则的重复周期不正确"; return 0; }
+
+		idx=$((idx + 1))
+	done
+
+	# Remove old sections and write the new ones with stable names.
+	for sec in $(schedule_sections); do
+		uci -q delete "$CONFIG.$sec"
+	done
+
+	while [ "$n" -lt "$idx" ]; do
+		action=$(printf '%s' "$input" | jsonfilter -e "@.rules[$n].action" 2>/dev/null)
+		tm=$(printf '%s' "$input" | jsonfilter -e "@.rules[$n].time" 2>/dev/null)
+		weekdays=$(printf '%s' "$input" | jsonfilter -e "@.rules[$n].weekdays" 2>/dev/null)
+		enabled=$(printf '%s' "$input" | jsonfilter -e "@.rules[$n].enabled" 2>/dev/null)
+
+		[ -n "$weekdays" ] || weekdays="*"
+		if [ "$enabled" = "0" ] || [ "$enabled" = "false" ]; then
+			enabled=0
+		else
+			enabled=1
+		fi
+
+		sec="rule$((n + 1))"
+		uci -q set "$CONFIG.$sec=schedule"
+		uci set "$CONFIG.$sec.enabled=$enabled"
+		uci set "$CONFIG.$sec.time=$tm"
+		uci set "$CONFIG.$sec.action=$action"
+		uci set "$CONFIG.$sec.weekdays=$weekdays"
+
+		n=$((n + 1))
+	done
+
+	if ! uci commit "$CONFIG"; then
+		emit_error "保存定时规则失败"
+		return 0
+	fi
+
+	sync_cron
+	emit_ok_msg "定时规则已保存（共 $idx 条）"
+}
+
+# Invoked by cron. $1 = on|off|force. Runs standalone, outside rpcd.
+do_run_scheduled() {
+	local type="${1:-}"
+
+	case "$type" in
+		on | off | force) ;;
+		*) exit 0 ;;
+	esac
+
+	read_config
+	local BODY
+	BODY=$(http_post "/api/power" "type=$type" 2>/dev/null)
+	[ -n "$BODY" ] ||
+		logger -t powercard "scheduled action '$type' failed"
+
+	# A soft shutdown may leave the board spinning: arm the watchdog,
+	# but only when the command actually reached the card.
+	[ "$type" = "off" ] && [ -n "$BODY" ] && watchdog_arm
+
+	exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Shutdown watchdog
+#
+# After any soft power-off (manual button or scheduled 'off'), arm a timer.
+# A per-minute cron tick checks the marker; once the grace period has elapsed
+# and the card still reports the PC as ON, it fires a single force shutdown.
+# The marker lives in tmpfs, so a router reboot clears any stale timer.
+# ---------------------------------------------------------------------------
+
+# Arm the watchdog: record the current epoch in the marker file.
+watchdog_arm() {
+	read_config
+	[ "$CFG_WATCHDOG_ENABLED" = "1" ] || return 0
+
+	local now
+	now=$(date +%s 2>/dev/null) || return 0
+	printf '%s\n' "$now" > "$WATCHDOG_STATE" 2>/dev/null
+}
+
+# Disarm the watchdog (e.g. the user powers the machine back on).
+watchdog_clear() {
+	rm -f "$WATCHDOG_STATE" 2>/dev/null
+}
+
+# Per-minute cron callback.
+do_watchdog_tick() {
+	local armed now elapsed limit mins pc_on
+
+	[ -f "$WATCHDOG_STATE" ] || exit 0
+
+	read_config
+	if [ "$CFG_WATCHDOG_ENABLED" != "1" ]; then
+		watchdog_clear
+		exit 0
+	fi
+
+	armed=$(cat "$WATCHDOG_STATE" 2>/dev/null)
+	case "$armed" in
+		'' | *[!0-9]*) watchdog_clear; exit 0 ;;
+	esac
+
+	now=$(date +%s 2>/dev/null) || exit 0
+	elapsed=$((now - armed))
+
+	mins="$CFG_WATCHDOG_MINUTES"
+	case "$mins" in
+		'' | *[!0-9]*) mins="$DEFAULT_WATCHDOG_MINUTES" ;;
+	esac
+	limit=$((mins * 60))
+
+	# Not yet due.
+	[ "$elapsed" -ge "$limit" ] || exit 0
+
+	# Due: ask the card whether the PC is still on.
+	local BODY
+	BODY=$(http_get "/api/status")
+	if [ -z "$BODY" ]; then
+		# Card unreachable: keep the marker and retry on the next tick.
+		exit 0
+	fi
+
+	pc_on=$(printf '%s' "$BODY" | jsonfilter -e '@.pc_on' 2>/dev/null)
+
+	# The firmware reports this as a JSON boolean or as 0/1; an empty
+	# value means the reply could not be parsed, so treat it like an
+	# unreachable card and retry instead of silently clearing the timer.
+	case "$pc_on" in
+		true | 1)
+			http_post "/api/power" "type=force" >/dev/null 2>&1
+			logger -t powercard \
+				"watchdog: PC still on after ${mins}min, forced power off"
+			watchdog_clear
+			;;
+		false | 0)
+			logger -t powercard \
+				"watchdog: soft shutdown completed within ${mins}min"
+			watchdog_clear
+			;;
+	esac
+
+	exit 0
+}
+
+do_get_watchdog() {
+	read_config
+	local mins="$CFG_WATCHDOG_MINUTES" armed="" remaining=0 now elapsed limit
+	case "$mins" in
+		'' | *[!0-9]*) mins="$DEFAULT_WATCHDOG_MINUTES" ;;
+	esac
+	[ "$CFG_WATCHDOG_ENABLED" = "1" ] || CFG_WATCHDOG_ENABLED="0"
+
+	# Report the pending timer (if any) so the UI can show a countdown.
+	if [ -f "$WATCHDOG_STATE" ]; then
+		armed=$(cat "$WATCHDOG_STATE" 2>/dev/null)
+		case "$armed" in
+			'' | *[!0-9]*) armed="" ;;
+		esac
+		if [ -n "$armed" ]; then
+			now=$(date +%s 2>/dev/null) || now=0
+			elapsed=$((now - armed))
+			limit=$((mins * 60))
+			remaining=$((limit - elapsed))
+			[ "$remaining" -ge 0 ] || remaining=0
+		fi
+	fi
+
+	if [ -n "$armed" ]; then
+		printf '{"enabled":"%s","minutes":"%s","armed":true,"remaining":%s}\n' \
+			"$CFG_WATCHDOG_ENABLED" "$mins" "$remaining"
+	else
+		printf '{"enabled":"%s","minutes":"%s","armed":false,"remaining":0}\n' \
+			"$CFG_WATCHDOG_ENABLED" "$mins"
+	fi
+}
+
+# Input: {"enabled":"1","minutes":"10"} - both fields optional.
+do_set_watchdog() {
+	local input enabled minutes
+
+	read -r input
+	enabled=$(printf '%s' "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
+	minutes=$(printf '%s' "$input" | jsonfilter -e '@.minutes' 2>/dev/null)
+
+	if [ "$enabled" = "0" ] || [ "$enabled" = "false" ]; then
+		enabled=0
+	elif [ -n "$enabled" ]; then
+		enabled=1
+	fi
+
+	if [ -n "$minutes" ]; then
+		valid_uint "$minutes" 1 180 || { emit_error "等待时间必须是 1~180 分钟"; return 0; }
+	fi
+
+	read_config
+	[ -n "$enabled" ] && uci set "$CONFIG.main.watchdog_enabled=$enabled"
+	[ -n "$minutes" ] && uci set "$CONFIG.main.watchdog_minutes=$minutes"
+
+	# Turning the feature off should also drop any pending timer.
+	[ "$enabled" = "0" ] && watchdog_clear
+
+	if uci commit "$CONFIG"; then
+		# The per-minute tick line depends on the enabled flag.
+		sync_cron
+		emit_ok_msg "关机保护设置已保存"
+	else
+		emit_error "保存设置失败"
+	fi
+}
+
+# (Re)install the powercard cron lines. Called by sync_cron and by the
+# package postinst so the per-minute watchdog tick is always present.
+ensure_cron() {
+	sync_cron
+}
+
+
 
 # HTTP transport: prefer curl. The card's tiny HTTP server rejects
 # POST requests made by some uclient-fetch builds (it requires an
@@ -217,6 +702,15 @@ do_power() {
 
 	BODY=$(http_post "/api/power" "$data")
 	output_body_or_error
+
+	# Shutdown watchdog: arm only when the soft power-off actually reached
+	# the card; disarm after a power-on or a manual force-off.
+	if [ -n "$BODY" ]; then
+		case "$type" in
+			off)        watchdog_arm ;;
+			on | force) watchdog_clear ;;
+		esac
+	fi
 }
 
 # The card reboots on these calls and usually drops the connection,
@@ -243,18 +737,35 @@ do_clear_wifi() {
 
 case "${1:-}" in
 	list)
-		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{}}\n'
+		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{},"get_schedule":{},"set_schedule":{"rules":[]},"get_watchdog":{},"set_watchdog":{"enabled":"","minutes":0}}\n'
 		;;
 	call)
 		case "${2:-}" in
-			status)      do_status ;;
-			get_config)  do_get_config ;;
-			set_config)  do_set_config ;;
-			power)       do_power ;;
-			reset)       do_reset ;;
-			clear_wifi)  do_clear_wifi ;;
-			*)           printf '{}\n' ;;
+			status)        do_status ;;
+			get_config)    do_get_config ;;
+			set_config)    do_set_config ;;
+			power)         do_power ;;
+			reset)         do_reset ;;
+			clear_wifi)    do_clear_wifi ;;
+			get_schedule)  do_get_schedule ;;
+			set_schedule)  do_set_schedule ;;
+			get_watchdog)  do_get_watchdog ;;
+			set_watchdog)  do_set_watchdog ;;
+			*)             printf '{}\n' ;;
 		esac
+		;;
+	run_scheduled)
+		# Direct invocation from cron, not via rpcd.
+		do_run_scheduled "${2:-}"
+		;;
+	watchdog_tick)
+		# Direct invocation from cron, every minute.
+		do_watchdog_tick
+		;;
+	ensure_cron)
+		# Direct invocation from postinst / manual repair.
+		read_config
+		ensure_cron
 		;;
 esac
 

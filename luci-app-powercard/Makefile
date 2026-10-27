@@ -9,10 +9,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-powercard
-PKG_VERSION:=1.0.0
-PKG_RELEASE:=3
+PKG_VERSION:=1.2.0
+PKG_RELEASE:=1
 
 LUCI_TITLE:=LuCI panel for ESP8266 PC PowerCard
+# Busybox already ships crond plus /etc/init.d/cron, which the schedule
+# feature relies on; no extra cron package dependency is needed.
 LUCI_DEPENDS:=+luci-base +rpcd +curl +uclient-fetch +jsonfilter
 LUCI_PKGARCH:=all
 
@@ -27,6 +29,15 @@ include $(TOPDIR)/feeds/luci/luci.mk
 define Package/$(PKG_NAME)/install
 	$(call Package/luci/install/target,$(1),$(PKG_INSTALL_DIR))
 	chmod 0755 $(1)/usr/libexec/rpcd/powercard
+endef
+
+# On install/upgrade, (re)install the powercard cron lines so the
+# per-minute shutdown-watchdog tick is present without a manual save.
+define Package/$(PKG_NAME)/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+/usr/libexec/rpcd/powercard ensure_cron >/dev/null 2>&1
+exit 0
 endef
 
 # call BuildPackage - OpenWrt buildroot signature

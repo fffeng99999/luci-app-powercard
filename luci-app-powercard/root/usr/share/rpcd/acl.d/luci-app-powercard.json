@@ -5,7 +5,9 @@
 			"ubus": {
 				"powercard": [
 					"status",
-					"get_config"
+					"get_config",
+					"get_schedule",
+					"get_watchdog"
 				],
 				"uci": [
 					"get"
@@ -21,7 +23,9 @@
 					"set_config",
 					"power",
 					"reset",
-					"clear_wifi"
+					"clear_wifi",
+					"set_schedule",
+					"set_watchdog"
 				],
 				"uci": [
 					"set",
