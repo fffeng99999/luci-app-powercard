@@ -9,7 +9,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-powercard
-PKG_VERSION:=1.3.0
+PKG_VERSION:=1.3.1
 PKG_RELEASE:=1
 
 LUCI_TITLE:=LuCI panel for ESP8266 PC PowerCard
@@ -37,6 +37,11 @@ define Package/$(PKG_NAME)/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 /usr/libexec/rpcd/powercard ensure_cron >/dev/null 2>&1
+# rpcd loads /usr/share/rpcd/acl.d only at startup: without a restart the
+# newly granted ubus methods stay "Access denied" (-32002) for every
+# session. Restarting also drops stale login sessions so LuCI re-reads
+# the permissions on the next login.
+/etc/init.d/rpcd restart >/dev/null 2>&1
 exit 0
 endef
 

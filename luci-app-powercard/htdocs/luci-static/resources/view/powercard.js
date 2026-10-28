@@ -775,7 +775,7 @@ return view.extend({
 				setTimeout(function () { self.refresh(); }, 300);
 			}
 		}).catch(function (e) {
-			self.toast('保存失败：' + (e && e.message ? e.message : 'RPC 错误'), false);
+			self.toast('保存失败：' + self.errText(e), false);
 		}).then(function () {
 			btn.disabled = false;
 			btn.textContent = '保存';
@@ -790,6 +790,15 @@ return view.extend({
 			if (t.isConnected)
 				t.className = 'toast';
 		}, 2800);
+	},
+
+	// -32002 Access denied 几乎都是"登录会话的权限快照过期"：
+	// 升级插件后 rpcd 的 ACL 变了，但旧会话仍按旧权限列表鉴权。
+	errText: function (e) {
+		var m = (e && e.message) ? e.message : '';
+		if (m.indexOf('-32002') !== -1 || m.indexOf('Access denied') !== -1)
+			return '权限不足：插件升级后需要重新登录 LuCI（退出再登录，或重启路由器）后重试';
+		return m || 'RPC 错误';
 	},
 
 	busy: function (show, txt) {
@@ -982,7 +991,7 @@ return view.extend({
 				self.refresh();
 			}
 		}).catch(function (e) {
-			self.toast('请求失败：' + (e && e.message ? e.message : 'RPC 错误'), false);
+			self.toast('请求失败：' + self.errText(e), false);
 			self.busy(false);
 			self.refresh();
 		});
@@ -1258,7 +1267,7 @@ return view.extend({
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '定时规则已保存' : '保存失败'), !!d.ok);
 		}).catch(function (e) {
-			self.toast('保存失败：' + (e && e.message ? e.message : 'RPC 错误'), false);
+			self.toast('保存失败：' + self.errText(e), false);
 		}).then(function () {
 			btn.disabled = false;
 			btn.textContent = '💾 保存全部定时规则';
@@ -1358,7 +1367,7 @@ return view.extend({
 			if (d.ok)
 				self.loadWatchdog();
 		}).catch(function (e) {
-			self.toast('保存失败：' + (e && e.message ? e.message : 'RPC 错误'), false);
+			self.toast('保存失败：' + self.errText(e), false);
 		}).then(function () {
 			btn.disabled = false;
 			btn.textContent = '💾 保存关机保护设置';
