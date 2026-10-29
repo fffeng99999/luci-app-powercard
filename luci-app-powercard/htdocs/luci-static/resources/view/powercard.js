@@ -462,6 +462,32 @@ var STYLES =
 '}' +
 '/* Native time inputs stay white-on-white in LuCI dark themes. */' +
 '#pcapp input[type="time"] { color-scheme: light dark; }' +
+/*
+ * luci-theme-design 的 dark.css 用 `input { background-color: transparent !important }`
+ * 覆盖掉 :checked 的底色，只留下白色 SVG 对勾。在白色卡片上对勾隐形，
+ * 看起来就像"复选框打不上勾"。这里在 #pcapp 作用域内显式补回配色。
+ */
+'#pcapp input[type="checkbox"] {' +
+'	appearance: none !important;' +
+'	-webkit-appearance: none !important;' +
+'	width: 18px !important;' +
+'	height: 18px !important;' +
+'	border: 1px solid #d1d5db !important;' +
+'	border-radius: 5px !important;' +
+'	background-color: #fff !important;' +
+'	background-image: none !important;' +
+'	cursor: pointer;' +
+'	flex-shrink: 0;' +
+'	transition: .15s all;' +
+'}' +
+'#pcapp input[type="checkbox"]:checked {' +
+'	background-color: #6366f1 !important;' +
+'	border-color: #6366f1 !important;' +
+'	background-image: url("data:image/svg+xml,%3csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 8 8\'%3e%3cpath fill=\'%23fff\' d=\'M6.564.75l-3.59 3.612-1.538-1.55L0 4.26 2.974 7.25 8 2.193z\'/%3e%3c/svg%3e") !important;' +
+'	background-size: 70% !important;' +
+'	background-repeat: no-repeat !important;' +
+'	background-position: center !important;' +
+'}' +
 '#pcapp .wd-row {' +
 '	display: flex;' +
 '	gap: 10px;' +
