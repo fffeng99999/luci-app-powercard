@@ -709,7 +709,14 @@ return view.extend({
 		};
 
 		this.schedRules = [];
+		this.wdDirty = false;
 
+		this.$('wdEnabled').addEventListener('change', function () {
+			this.wdDirty = true;
+		}.bind(this));
+		this.$('wdMinutes').addEventListener('input', function () {
+			this.wdDirty = true;
+		}.bind(this));
 		this.$('btnOn').addEventListener('click', function () { this.doAction('on'); }.bind(this));
 		this.$('btnOff').addEventListener('click', function () { this.doAction('off'); }.bind(this));
 		this.$('btnForce').addEventListener('click', function () { this.doAction('force'); }.bind(this));
@@ -1287,7 +1294,10 @@ return view.extend({
 		if (!el)
 			return;
 
-		if (d.armed && d.enabled === '1') {
+		var enabled = (typeof d.watchdog_enabled !== 'undefined') ?
+			d.watchdog_enabled : d.enabled;
+
+		if (d.armed && enabled === '1') {
 			el.classList.add('show');
 			el.textContent = '⏳ 已检测到软关机指令，剩余 ' +
 				this.fmtCountdown(d.remaining) +
@@ -1309,10 +1319,16 @@ return view.extend({
 				return;
 
 			var chk = self.$('wdEnabled'),
-			    inp = self.$('wdMinutes');
+			    inp = self.$('wdMinutes'),
+			    enabled = (typeof d.watchdog_enabled !== 'undefined') ?
+			        d.watchdog_enabled : d.enabled,
+			    minutes = (typeof d.watchdog_minutes !== 'undefined') ?
+			        d.watchdog_minutes : d.minutes;
 
-			chk.checked = (d.enabled === '1');
-			inp.value = d.minutes || '10';
+			if (!self.wdDirty) {
+				chk.checked = (enabled === '1');
+				inp.value = minutes || '10';
+			}
 
 			self.updateWatchdogState(d);
 
@@ -1321,7 +1337,7 @@ return view.extend({
 				clearInterval(wdTimer);
 				wdTimer = null;
 			}
-			if (d.armed && d.enabled === '1') {
+			if (d.armed && enabled === '1') {
 				wdTimer = setInterval(function () {
 					if (!self.root || !self.root.isConnected) {
 						clearInterval(wdTimer);
@@ -1360,8 +1376,10 @@ return view.extend({
 		callSetWatchdogConfig(enabled, minutes).then(function (d) {
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '关机保护设置已保存' : '保存失败'), !!d.ok);
-			if (d.ok)
+			if (d.ok) {
+				self.wdDirty = false;
 				self.loadWatchdog();
+			}
 		}).catch(function (e) {
 			self.toast('保存失败：' + self.errText(e), false);
 		}).then(function () {
