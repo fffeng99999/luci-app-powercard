@@ -227,19 +227,69 @@ weekdays_to_cron() {
 	printf '%s' "$part"
 }
 
+read_watchdog_state() {
+	local armed="" now elapsed limit mins="$CFG_WATCHDOG_MINUTES"
+
+	WATCHDOG_ARMED=false
+	WATCHDOG_REMAINING=0
+	case "$mins" in
+		'' | *[!0-9]*) mins="$DEFAULT_WATCHDOG_MINUTES" ;;
+	esac
+
+	[ -f "$WATCHDOG_STATE" ] || return 0
+	armed=$(cat "$WATCHDOG_STATE" 2>/dev/null)
+	case "$armed" in
+		'' | *[!0-9]*) return 0 ;;
+	esac
+
+	now=$(date +%s 2>/dev/null) || now=0
+	elapsed=$((now - armed))
+	limit=$((mins * 60))
+	WATCHDOG_REMAINING=$((limit - elapsed))
+	[ "$WATCHDOG_REMAINING" -ge 0 ] || WATCHDOG_REMAINING=0
+	WATCHDOG_ARMED=true
+}
+
 do_get_config() {
 	read_config
-	printf '{"ip":"%s","port":"%s","timeout":"%s"}\n' \
-		"$CFG_IP" "$CFG_PORT" "$CFG_TIMEOUT"
+	[ "$CFG_WATCHDOG_ENABLED" = "1" ] || CFG_WATCHDOG_ENABLED="0"
+	[ "$CFG_SCHED_PRECHECK" = "0" ] || CFG_SCHED_PRECHECK="1"
+	read_watchdog_state
+
+	# Keep the original address fields and append the newer settings.  The UI
+	# deliberately uses this original RPC so sessions created before an upgrade
+	# can still read and save every option with their cached ACL.
+	printf '{"ip":"%s","port":"%s","timeout":"%s","watchdog_enabled":"%s","watchdog_minutes":"%s","precheck":"%s","armed":%s,"remaining":%s,"rules":[' \
+		"$CFG_IP" "$CFG_PORT" "$CFG_TIMEOUT" \
+		"$CFG_WATCHDOG_ENABLED" "$CFG_WATCHDOG_MINUTES" "$CFG_SCHED_PRECHECK" \
+		"$WATCHDOG_ARMED" "$WATCHDOG_REMAINING"
+	print_schedule_rules
+	printf ']}\n'
 }
 
 do_set_config() {
-	local input ip port timeout
+	local input ip port timeout watchdog_enabled watchdog_minutes precheck
 
 	read -r input
 	ip=$(printf '%s' "$input" | jsonfilter -e '@.ip' 2>/dev/null)
 	port=$(printf '%s' "$input" | jsonfilter -e '@.port' 2>/dev/null)
 	timeout=$(printf '%s' "$input" | jsonfilter -e '@.timeout' 2>/dev/null)
+	watchdog_enabled=$(printf '%s' "$input" | jsonfilter -e '@.watchdog_enabled' 2>/dev/null)
+	watchdog_minutes=$(printf '%s' "$input" | jsonfilter -e '@.watchdog_minutes' 2>/dev/null)
+	precheck=$(printf '%s' "$input" | jsonfilter -e '@.precheck' 2>/dev/null)
+
+	# Settings-only calls do not need to resend the device address.  Route them
+	# through the same validators used by the backwards-compatible RPC methods.
+	if [ -z "$ip" ] && [ -z "$port" ] && [ -z "$timeout" ]; then
+		if [ -n "$watchdog_enabled" ] || [ -n "$watchdog_minutes" ]; then
+			set_watchdog_input "$input"
+			return 0
+		fi
+		if [ -n "$precheck" ]; then
+			set_schedule_input "$input"
+			return 0
+		fi
+	fi
 
 	if ! valid_ip "$ip"; then
 		emit_error "IP 地址格式不正确"
@@ -350,13 +400,9 @@ sync_cron() {
 	return 0
 }
 
-do_get_schedule() {
-	local first=1 sec action tm weekdays enabled precheck
+print_schedule_rules() {
+	local first=1 sec action tm weekdays enabled
 
-	read_config
-	[ "$CFG_SCHED_PRECHECK" = "1" ] && precheck=1 || precheck=0
-
-	printf '{"precheck":"%s","rules":[' "$precheck"
 	for sec in $(schedule_sections); do
 		action=$(uci -q get "$CONFIG.$sec.action")
 		tm=$(uci -q get "$CONFIG.$sec.time")
@@ -371,15 +417,23 @@ do_get_schedule() {
 		printf '{"id":"%s","enabled":"%s","time":"%s","action":"%s","weekdays":"%s"}' \
 			"$sec" "$enabled" "$tm" "$action" "$weekdays"
 	done
+}
+
+do_get_schedule() {
+	local precheck
+
+	read_config
+	[ "$CFG_SCHED_PRECHECK" = "1" ] && precheck=1 || precheck=0
+
+	printf '{"precheck":"%s","rules":[' "$precheck"
+	print_schedule_rules
 	printf ']}\n'
 }
 
 # Input: {"rules":[{"enabled":"1","time":"08:00","action":"on","weekdays":"1-5"},...]}
 # The list fully replaces the stored schedule.
-do_set_schedule() {
-	local input idx=0 n=0 action tm weekdays enabled sec
-
-	read -r input
+set_schedule_input() {
+	local input="$1" idx=0 n=0 action tm weekdays enabled sec
 
 	# jsonfilter exposes neither array length nor multiple expressions,
 	# so probe the indexes one field at a time and validate as we go.
@@ -457,6 +511,12 @@ do_set_schedule() {
 
 	sync_cron
 	emit_ok_msg "定时规则已保存（共 $idx 条）"
+}
+
+do_set_schedule() {
+	local input
+	read -r input
+	set_schedule_input "$input"
 }
 
 # Invoked by cron. $1 = on|off|force. Runs standalone, outside rpcd.
@@ -621,43 +681,24 @@ do_watchdog_tick() {
 
 do_get_watchdog() {
 	read_config
-	local mins="$CFG_WATCHDOG_MINUTES" armed="" remaining=0 now elapsed limit
+	local mins="$CFG_WATCHDOG_MINUTES"
 	case "$mins" in
 		'' | *[!0-9]*) mins="$DEFAULT_WATCHDOG_MINUTES" ;;
 	esac
 	[ "$CFG_WATCHDOG_ENABLED" = "1" ] || CFG_WATCHDOG_ENABLED="0"
+	read_watchdog_state
 
-	# Report the pending timer (if any) so the UI can show a countdown.
-	if [ -f "$WATCHDOG_STATE" ]; then
-		armed=$(cat "$WATCHDOG_STATE" 2>/dev/null)
-		case "$armed" in
-			'' | *[!0-9]*) armed="" ;;
-		esac
-		if [ -n "$armed" ]; then
-			now=$(date +%s 2>/dev/null) || now=0
-			elapsed=$((now - armed))
-			limit=$((mins * 60))
-			remaining=$((limit - elapsed))
-			[ "$remaining" -ge 0 ] || remaining=0
-		fi
-	fi
-
-	if [ -n "$armed" ]; then
-		printf '{"enabled":"%s","minutes":"%s","armed":true,"remaining":%s}\n' \
-			"$CFG_WATCHDOG_ENABLED" "$mins" "$remaining"
-	else
-		printf '{"enabled":"%s","minutes":"%s","armed":false,"remaining":0}\n' \
-			"$CFG_WATCHDOG_ENABLED" "$mins"
-	fi
+	printf '{"enabled":"%s","minutes":"%s","armed":%s,"remaining":%s}\n' \
+		"$CFG_WATCHDOG_ENABLED" "$mins" "$WATCHDOG_ARMED" "$WATCHDOG_REMAINING"
 }
 
 # Input: {"enabled":"1","minutes":"10"} - both fields optional.
-do_set_watchdog() {
-	local input enabled minutes
-
-	read -r input
+set_watchdog_input() {
+	local input="$1" enabled minutes
 	enabled=$(printf '%s' "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
 	minutes=$(printf '%s' "$input" | jsonfilter -e '@.minutes' 2>/dev/null)
+	[ -n "$enabled" ] || enabled=$(printf '%s' "$input" | jsonfilter -e '@.watchdog_enabled' 2>/dev/null)
+	[ -n "$minutes" ] || minutes=$(printf '%s' "$input" | jsonfilter -e '@.watchdog_minutes' 2>/dev/null)
 
 	if [ "$enabled" = "0" ] || [ "$enabled" = "false" ]; then
 		enabled=0
@@ -683,6 +724,12 @@ do_set_watchdog() {
 	else
 		emit_error "保存设置失败"
 	fi
+}
+
+do_set_watchdog() {
+	local input
+	read -r input
+	set_watchdog_input "$input"
 }
 
 # (Re)install the powercard cron lines. Called by sync_cron and by the
@@ -813,7 +860,7 @@ do_clear_wifi() {
 
 case "${1:-}" in
 	list)
-		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{},"get_schedule":{},"set_schedule":{"rules":[],"precheck":""},"get_watchdog":{},"set_watchdog":{"enabled":"","minutes":0}}\n'
+		printf '{"status":{},"get_config":{},"set_config":{"ip":"","port":0,"timeout":0,"watchdog_enabled":"","watchdog_minutes":0,"rules":[],"precheck":""},"power":{"type":"","ms":0},"reset":{},"clear_wifi":{},"get_schedule":{},"set_schedule":{"rules":[],"precheck":""},"get_watchdog":{},"set_watchdog":{"enabled":"","minutes":0}}\n'
 		;;
 	call)
 		case "${2:-}" in

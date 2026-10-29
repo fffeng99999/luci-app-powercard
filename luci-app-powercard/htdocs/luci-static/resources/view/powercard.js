@@ -42,26 +42,22 @@ var callClearWifi = rpc.declare({
 	method: 'clear_wifi'
 });
 
-var callGetSchedule = rpc.declare({
+/*
+ * Reuse the original config RPC for the newer settings as well.  Apart from
+ * keeping all persisted settings in one response, this is important during
+ * upgrades: an existing LuCI login session already grants get_config and
+ * set_config, but its cached ACL may not contain the newer RPC method names.
+ */
+var callSetScheduleConfig = rpc.declare({
 	object: 'powercard',
-	method: 'get_schedule'
-});
-
-var callSetSchedule = rpc.declare({
-	object: 'powercard',
-	method: 'set_schedule',
+	method: 'set_config',
 	params: ['rules', 'precheck']
 });
 
-var callGetWatchdog = rpc.declare({
+var callSetWatchdogConfig = rpc.declare({
 	object: 'powercard',
-	method: 'get_watchdog'
-});
-
-var callSetWatchdog = rpc.declare({
-	object: 'powercard',
-	method: 'set_watchdog',
-	params: ['enabled', 'minutes']
+	method: 'set_config',
+	params: ['watchdog_enabled', 'watchdog_minutes']
 });
 
 var pollTimer = null;
@@ -1099,7 +1095,7 @@ return view.extend({
 		if (!self.root || !self.root.isConnected)
 			return;
 
-		callGetSchedule().then(function (d) {
+		callGetConfig().then(function (d) {
 			if (!self.root.isConnected)
 				return;
 
@@ -1263,7 +1259,7 @@ return view.extend({
 		var preEl = self.$('schedPrecheck');
 		var precheck = (preEl && preEl.checked) ? '1' : '0';
 
-		callSetSchedule(rules, precheck).then(function (d) {
+		callSetScheduleConfig(rules, precheck).then(function (d) {
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '定时规则已保存' : '保存失败'), !!d.ok);
 		}).catch(function (e) {
@@ -1308,7 +1304,7 @@ return view.extend({
 		if (!self.root || !self.root.isConnected)
 			return;
 
-		callGetWatchdog().then(function (d) {
+		callGetConfig().then(function (d) {
 			if (!d || !self.root.isConnected)
 				return;
 
@@ -1332,7 +1328,7 @@ return view.extend({
 						wdTimer = null;
 						return;
 					}
-					callGetWatchdog().then(function (d2) {
+					callGetConfig().then(function (d2) {
 						if (!d2 || !self.root.isConnected)
 							return;
 						self.updateWatchdogState(d2);
@@ -1361,7 +1357,7 @@ return view.extend({
 		btn.disabled = true;
 		btn.textContent = '保存中...';
 
-		callSetWatchdog(enabled, minutes).then(function (d) {
+		callSetWatchdogConfig(enabled, minutes).then(function (d) {
 			d = d || {};
 			self.toast(d.msg || (d.ok ? '关机保护设置已保存' : '保存失败'), !!d.ok);
 			if (d.ok)
